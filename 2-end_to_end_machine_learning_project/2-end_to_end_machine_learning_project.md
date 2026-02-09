@@ -87,6 +87,8 @@ import pandas as pd
 import tarfile
 import urllib.request
 
+from sklearn import preprocessing
+
 def load_housing_data():
   tarball_path = Path('datasets/housing.tgz')
   if not tarball_path.is_file():
@@ -201,10 +203,12 @@ There's a shorter way to do this, although it will
 require looping for using 10 strats:
 
 ```python
-# strat_train_set, strat_test_set = train_test_split(
-#   housing_full, test_size=0.2, stratify=housing_full['income_cat'],
-#   random_state=42
-# )
+"""
+strat_train_set, strat_test_set = train_test_split(
+  housing_full, test_size=0.2, stratify=housing_full['income_cat'],
+  random_state=42
+)
+""" 
 ```
 
 Lets check if the income categories proportions are 
@@ -362,71 +366,6 @@ housing = strat_train_set.drop('median_house_value', axis=1)
 housing_labels = strat_train_set['median_house_value'].copy()
 ```
 
-### Clean the Data
-
-Imputing values for the NA values can easily be done
-with pandas `fill_na` method, but the authors presents
-a new way of doing this: With the `sklearn.impute` class
-`SimpleImputer`. SimpleImputer takes an `strategy parameter`,
-in this case we'll use the median. 
-
-```python
-from sklearn.impute import SimpleImputer
-imputer = SimpleImputer(strategy='median')
-```
-
-Since the median can only be calculated on numerical
-values, we'll subselect those of our dataset:
-
-```python
-housing_num = housing.select_dtypes(include=[np.number])
-```
-
-Now we can calculate the attribute from the imputer:
-
-```python
-imputer.fit(housing_num)
-```
-
-The imputer has stored the result in it's `statistics_` 
-instance variable. Let's check it out:
-
-```python
-imputer.statistics_
-```
-
-```python
-housing_num.median().values
-```
-
-Now we can use the imputer to `transform` the training
-dataset:
-
-```python
-X = imputer.transform(housing_num)
-```
-
-Note that the imputer also support other strategies,
-such as `mean`, `most_frequent`, `constant, fill_value=`.
-
-There are also more powerful imputer classes, such as
-the `KNNImputer`, which uses the mean of the k-nearest
-neighbours of that instance. There's also `IterativeImputer`,
-which trains a regression model based on the non-missing
-values to predict the missing ones. It then trains the
-model again with the updated data and improves this
-with each iteration.
-
-The output of sklearn's transforms is by default a numpy
-array, and thus has no index nor columns. If we set
-`sklearn.set_config(transform_output='pandas')`, we can 
-get pandas in, pandas out. Here, we'll just reconstruct 
-the DataFrame:
-
-```python
-housing_tr = pd.DataFrame(X, index=housing_num.index,
-                          columns=housing_num.columns)
-```
 
 ### Scikit-Learn Design Principles
 
@@ -468,5 +407,460 @@ suffix (such as `statistics_`)
 
 ### Handling Text and Categorical Attributes
 
+Now it's time to handle text in our dataset. We only
+have one text column, `ocean_proximity`. Let's look
+at it's values:
 
+```python
+housing_cat = housing[['ocean_proximity']]
+housing_cat['ocean_proximity'].unique()
+```
 
+There are two ways to encode this: One is with sequential
+integers, another with one-hot encoding, which in pandas we
+had as `get_dummy()` attribute. Sequential integers can be
+obtained with the `OrdinalEncoder` class, from `sklearn.preprocessing`:
+
+```python
+from sklearn.preprocessing import OrdinalEncoder
+ordinal_encoder = OrdinalEncoder()
+housing_cat_encoded = ordinal_encoder.fit_transform(housing_cat)
+housing_cat_encoded[:8]
+```
+
+We can check the categories with `categories_` attribute:
+
+```python
+ordinal_encoder.categories_
+```
+
+The problem here is that ML algorithms tend to consider
+closer integers... closer. So we can use dummies with
+one-hot encoding instead:
+
+```python
+from sklearn.preprocessing import OneHotEncoder
+one_hot_encoder = OneHotEncoder()
+housing_cat_encoded = one_hot_encoder.fit_transform(housing_cat)
+housing_cat_encoded[:8]
+```
+
+What is this output? It's a sparse matrix. Sparse matrices
+are a more efficient way of storing matrices composed of 
+only zeroes and ones. Instead of storing the whole matrix,
+they store only the 1 values and their position. We can
+convert to a dense numpy array with `.toarray()`, or
+use `sparse_output=False` in the construction of the 
+`OneHotEncoder()`.
+
+Why use sklearn's encoder instead of pandas? sklearn remembers
+the features it was trained on, and if you feed it a category
+that wasn't previously informed, it will Raise or ignore,
+depending on the set up when constructing the encoder.
+
+### Feature Scaling and Transformation
+ 
+Most ML algorithms perform better when features are
+in a same scale. Then, it is a matter of transforming
+and inverse transforming any set of features. This can
+be done with the labels, too.
+
+#### Min-Max scaling
+
+Scales features down to a certain range, default 0-1:
+
+```python
+from sklearn.preprocessing import MinMaxScaler
+mmscaler = MinMaxScaler(feature_range=(-1, 1))
+housing_num = housing.select_dtypes(np.number)
+housin_num_mm_scale = mmscaler.fit_transform(housing_num)
+housin_num_mm_scale[:3, :]
+```
+
+#### Standard Scaling
+
+Creates a z-value by subtracting the mean and dividing
+by the standard deviation
+
+```python
+from sklearn.preprocessing import StandardScaler
+std_scaler = StandardScaler()
+housing_num_std = std_scaler.fit_transform(housing_num)
+housing_num_std[:3]
+```
+
+#### Bucketizing as numerical
+
+This method can be used (for example, with `pd.qcut`)
+for dealing with heavy-tailed features, and then using
+the buckets as numerical values.
+
+#### Bucketizing as categories
+
+This strategy is useful for multimodal distributions
+(with two or more peaks). We again bucketize, but then
+treat the buckets id's as categories, meaning we encode
+them again with perhaps `OneHotEncoder`, for example.
+This ensures that the ML algorithm can learn different
+patterns for different ranges of a value, such as of
+`housing_median_age`
+
+#### Radial Basis Function
+
+Another way of dealing with multimodal distributions
+is to create a feature for each mode representing the 
+similarity between each instance's value and the
+mode. This is usually done with a distance function,
+such as the Gaussian Radial Basis Function, which
+decays exponentially the further from the mode. 
+The equation is `e^{-y(x-35)^2}`. It is implemented
+in sklearn in `sklearn.metrics.pairwise.rbf_ernel`,
+and we'll demonstrate it with the `housing_median_age`, 
+which has a one of it's modes around 35:
+
+```python
+from sklearn.metrics.pairwise import rbf_kernel
+import matplotlib.pyplot as plt
+age_simil_35 = rbf_kernel(housing[['housing_median_age']].sort_values('housing_median_age'),
+                          [[35]], gamma=0.1)
+fig, ax = plt.subplots()
+ax.hist(x = housing[['housing_median_age']].sort_values('housing_median_age'), bins=70)
+ax.set_xlim((0, 51))
+ax2 = ax.twinx()
+ax2.set_xlim((0, 51))
+ax2.plot(housing[['housing_median_age']].sort_values('housing_median_age'), age_simil_35,
+         color='red')
+```
+
+#### Transforming the target feature
+
+Transforming the label is also interesting
+when it has a heavy tail. But since we want to 
+predict the feature itself, not it's transformed
+form, we need to reverse the transformation after
+the prediction is made. Sklearn implements this 
+in the `sklearn.compose` `TransformedTargetRegressor`
+class. It has hyperparameters for the model and
+`transformer` class instance to use, and returns
+the reversed-transformed value with it's `predict`
+method:
+
+```python
+from sklearn.compose import TransformedTargetRegressor
+from sklearn.linear_model import LinearRegression
+model = TransformedTargetRegressor(LinearRegression(),
+                                   transformer=StandardScaler())
+model.fit(housing[['median_income']], housing_labels)
+some_new_data = housing[['median_income']].iloc[:5] # pretend this is new data
+predictions = model.predict(some_new_data)
+```
+
+```python
+predictions
+```
+
+### Transformation Pipelines
+
+Transformation pipelines are a way of automating a 
+sequence of steps in data transformation, to lastly
+make a transformation or another estimator action,
+such as a prediction. We make a pipeline with
+`sklearn.pipeline`'s `Pipeline` object. In the following
+example, we create a numerical attribute pipeline:
+
+```python
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+
+num_pipeline = Pipeline([
+    ('impute', SimpleImputer(strategy='median')),
+    ('stardardize', StandardScaler()),
+])
+```
+
+The pipeline takes a list of name-estimator tuples. 
+The names will be useful for hyperparameter tuning.
+If you're lazy, you can use the `make_pipeline`
+function instead of the `Pipeline` class, which
+will accept transformer classes as positional
+arguments, and automatically set names equal to the
+classes names in lowercase and no underscores:
+
+```python
+from sklearn.pipeline import make_pipeline
+
+num_pipeline = make_pipeline(SimpleImputer(strategy='median'),
+                             StandardScaler())
+```
+The pipeline itself has the `fit()`, `transform()`, or
+`predict()` methods, depending on if the last estimator
+has any of those. When called, the pipeline will `fit_transform()`
+every single estimator and pass the result to the next one,
+until the last estimator, where it will fit, transform, or predict
+according to the appropriate method.
+
+Let's look at the pipeline in action with our `housing_num`
+variable:
+
+```python
+housing_num_prepared = num_pipeline.fit_transform(housing_num)
+housing_num_prepared[:2].round(2)
+```
+
+If we want to construct this as a DataFrame, we can use
+the `get_feature_names_out()` method:
+
+```python
+df_housing_num_prepared = pd.DataFrame(
+    housing_num_prepared, 
+    columns=num_pipeline.get_feature_names_out(),
+    index=housing_num.index
+)
+df_housing_num_prepared.iloc[:2].round(2)
+```
+
+We can access each estimator from the pipeline with by indexing
+with ints or with the name of the estimator, such as a dictionary
+object. 
+
+With `ColumnTransformer` we're able to apply different pipelines
+to different columns. We import it from `sklearn.compose`, and
+the class takes a list of 3-tuples with the pipeline name,
+the pipeline itself, and a list of columns to apply it to:
+
+```python
+from sklearn.compose import ColumnTransformer
+
+cat_columns = ['ocean_proximity']
+num_columns = ["longitude", "latitude", "housing_median_age",
+               "total_rooms",  "total_bedrooms", "population",
+               "households", "median_income"]
+
+cat_pipeline = make_pipeline(
+    SimpleImputer(strategy='most_frequent'),
+    OneHotEncoder(handle_unknown='ignore')
+)
+
+preprocessing = ColumnTransformer([
+    ('cat', cat_pipeline, cat_columns),
+    ('num', num_pipeline, num_columns)
+])
+```
+
+However, we can get lazier than that. Listing all column
+names is obviously not that convenient, and perhaps we don't
+really care about naming each pipeline step. So instead
+of using the class itself, we use `make_column_transformer()` and
+`make_column_selector`:
+
+```python
+from sklearn.compose import make_column_transformer, make_column_selector
+
+preprocessing = make_column_transformer(
+    (cat_pipeline, make_column_selector(dtype_include=object)),
+    (num_pipeline, make_column_selector(dtype_include=np.number))
+)
+```
+
+Now we can just apply this column transformer to our housing data:
+
+```python
+housing_prepared = preprocessing.fit_transform(housing)
+```
+
+### Clusters
+
+Advanced section, but used in the final pipeline:
+
+```python
+from sklearn.cluster import KMeans 
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class ClusterSimilarity(BaseEstimator, TransformerMixin):
+    def __init__(self, n_clusters=10, gamma=1.0, random_state=None):
+        self.n_clusters = n_clusters  
+        self.gamma = gamma  
+        self.random_state = random_state  
+
+    def fit(self, X, y=None, sample_weight=None):
+        self.kmeans_ = KMeans(self.n_clusters, random_state=self.random_state)  
+        self.kmeans_.fit(X, sample_weight=sample_weight)  
+        return self # always return self!
+
+    def transform(self, X):
+        return rbf_kernel(X, self.kmeans_.cluster_centers_, gamma=self.gamma)  
+
+    def get_feature_names_out(self, names=None):
+        return [f"Cluster {i} similarity" for i in range(self.n_clusters)]
+
+```
+
+### Recap and wrap the pipeline
+
+We've made some decisions about handling the data that
+should be recapped before we make the final code that will
+transform and prepare all the data:
+
+- NA values in numerical attributes will be replaced by the median.
+- NA values in categorical attributes will be replaced by the most frequent
+- Categorical attributes will be mapped with One Hot Encoding
+- Ratio columns will be added to hopefully better correlate with `median_house_value`: `bedroom_ratio`, `rooms_per_house` and `people_per_house`.
+- Clusters and proximity to clusters will be added as they could
+be more useful than longitude and latitude;
+- Long-tailed features will be replaced with their log;
+- All numerical features will be standardized;
+
+The following code will build the pipeline to all of that:
+
+```python
+from sklearn.preprocessing import FunctionTransformer
+
+def column_ratio(X):
+    return X[:, [0]] / X[:, [1]]
+
+def ratio_name(function_transformer, feature_names_in):
+    return ['ratio'] # feature names out
+
+def ratio_pipeline():
+    return make_pipeline(
+        SimpleImputer(strategy='median'),
+        FunctionTransformer(column_ratio,
+                            feature_names_out=ratio_name),
+        StandardScaler()
+    )
+
+log_pipeline = make_pipeline(
+    SimpleImputer(strategy='median'),
+    FunctionTransformer(np.log, feature_names_out='one-to-one'),
+    StandardScaler()
+)
+
+cluster_simil = ClusterSimilarity(n_clusters=10, gamma=1.,
+                                  random_state=42)
+
+default_num_pipeline = make_pipeline(
+        SimpleImputer(strategy='median'),
+        StandardScaler()
+)
+
+preprocessing = ColumnTransformer([
+    ('bedrooms', ratio_pipeline(), ['total_bedrooms', 'total_rooms']),
+    ('rooms_per_house', ratio_pipeline(), ['total_rooms', 'households']),
+    ('people_per_house', ratio_pipeline(), ['population', 'households']),
+    ('log', log_pipeline, ['total_bedrooms', 'total_rooms', 'population',
+                           'households', 'median_income']),
+    ('geo', cluster_simil, ['latitude', 'longitude']),
+    ('cat', cat_pipeline, make_column_selector(dtype_include=object)),
+    ],
+    remainder=default_num_pipeline # housing_median_age
+)
+```
+
+Running this ColumnTransformer returns a np array with
+24 features:
+
+```python
+housing.drop('income_cat', axis=1, inplace=True)
+housing_prepared = preprocessing.fit_transform(housing)
+housing_prepared.shape
+```
+
+```python
+preprocessing.get_feature_names_out()
+```
+
+## Select and Train a Model
+
+After we've framed the problem, gathered the data,
+explored and visualized it, and set a transformation
+pipeline to automatically clean it up and prepare it
+for the ML algorithms, it is finally time to select
+and train an ML model!
+
+### Train and Evaluate on the Training Set
+
+Thanks to the fact that we did all the previous steps,
+this should now be easy! Let's begin by training a simple
+linear regression model:
+
+```python
+from sklearn.linear_model import LinearRegression
+
+lin_reg = make_pipeline(preprocessing, LinearRegression())
+lin_reg.fit(housing, housing_labels)
+housing_predictions = lin_reg.predict(housing)
+```
+
+Since we chose root mean squared error as our
+performance measure, let's measure it in the 
+whole training set: 
+
+```python
+from sklearn.metrics import root_mean_squared_error
+lin_rmse = root_mean_squared_error(housing_predictions,
+                                   housing_labels)
+lin_rmse
+```
+
+This is quite the error! It is explainable by the model
+underfitting the training data. We cannot reduce constraints
+in the model as it was not regularized, so perhaps we could
+feed it different features or choose a more powerful model.
+Let's go with the latter, using a `DecisionTreeRegressor`:
+
+```python
+from sklearn.tree import DecisionTreeRegressor
+
+tree_reg = make_pipeline(preprocessing, DecisionTreeRegressor(random_state=42))
+tree_reg.fit(housing, housing_labels)
+housing_predictions = tree_reg.predict(housing)
+tree_rmse = root_mean_squared_error(housing_predictions,
+                                    housing_labels)
+tree_rmse
+```
+
+What's that, a perfect model? Such a thing doesn't exist, 
+so the model is probably overfitting the data. To be sure,
+we can use cross-validation to better evaluate it:
+
+### Better Evaluation with Cross-Validation
+
+We'll split the training set into 10 pieces. Each 
+iteration, we'll train with 9/10 of the pieces and
+evaluate with the 1/10 left out. This ensures the new
+piece is not part of the learnt data, and thus cannot
+have been overfit. `sklearn.model_selection` implements
+this with `cross_val_score`:
+
+```python
+from sklearn.model_selection import cross_val_score
+
+tree_rmses = -cross_val_score(tree_reg, housing, housing_labels,
+                             scoring="neg_root_mean_squared_error",
+                             cv=10)
+```
+
+cross_val_score expects an utility function instead of
+a cost function, so we use a negative sign and negative
+root mean squared error to evaluate. Let's check the
+results:
+
+```python
+pd.Series(tree_rmses).describe()
+```
+
+Our tree is performing almost quite as poorly as the
+linear regression model. We'll now try an even more
+powerful model, an ensemble model: `RandomForestRegressor`,
+imported from `sklearn.ensemble`:
+
+```python
+from sklearn.ensemble import RandomForestRegressor
+
+forest_reg = make_pipeline(preprocessing,
+                           RandomForestRegressor(random_state=42))
+forest_rmses = -cross_val_score(forest_reg, housing, housing_labels,
+                                scoring='neg_root_mean_squared_error',
+                                cv=10)
+pd.Series(forest_rmses).describe()
+```
